@@ -3613,6 +3613,103 @@ describe('extmark decorations', function()
     eq(5, n.fn.line('w0'))
   end)
 
+  it('scrolls correctly with conceal_lines and virtual lines below', function()
+    screen:try_resize(12, 9)
+    command('set conceallevel=2')
+    api.nvim_buf_set_lines(0, 0, -1, false, { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l' })
+    api.nvim_buf_set_extmark(0, ns, 1, 0, { conceal_lines = '' })
+    api.nvim_buf_set_extmark(0, ns, 0, 0, { virt_lines = { { { 'V1' } }, { { 'V2' } } } })
+    command('normal! 4Gzt')
+    command('redraw!')
+
+    feed('<C-y>')
+    screen:expect([[
+      c           |
+      ^d           |
+      e           |
+      f           |
+      g           |
+      h           |
+      i           |
+      j           |
+                  |
+    ]])
+    feed('<C-y>')
+    screen:expect([[
+      V2          |
+      c           |
+      ^d           |
+      e           |
+      f           |
+      g           |
+      h           |
+      i           |
+                  |
+    ]])
+  end)
+
+  it('scrolls correctly with conceal_lines and virtual lines above', function()
+    screen:try_resize(12, 9)
+    command('set conceallevel=2 relativenumber')
+    api.nvim_buf_set_lines(0, 0, -1, false, { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l' })
+    api.nvim_buf_set_extmark(0, ns, 1, 0, { conceal_lines = '' })
+    api.nvim_buf_set_extmark(0, ns, 2, 0, {
+      virt_lines = { { { 'V1' } }, { { 'V2' } }, { { 'V3' } } },
+      virt_lines_above = true,
+    })
+    command('normal! 3Gzt')
+    command('redraw!')
+
+    feed('<C-y>')
+    screen:expect([[
+      {2:    }V1      |
+      {2:    }V2      |
+      {2:    }V3      |
+      {2:  0 }^c       |
+      {2:  1 }d       |
+      {2:  2 }e       |
+      {2:  3 }f       |
+      {2:  4 }g       |
+                  |
+    ]])
+    feed('j')
+    screen:expect([[
+      {2:    }V1      |
+      {2:    }V2      |
+      {2:    }V3      |
+      {2:  1 }c       |
+      {2:  0 }^d       |
+      {2:  1 }e       |
+      {2:  2 }f       |
+      {2:  3 }g       |
+                  |
+    ]])
+    feed('k<C-y>')
+    screen:expect([[
+      {2:  2 }a       |
+      {2:    }V1      |
+      {2:    }V2      |
+      {2:    }V3      |
+      {2:  0 }^c       |
+      {2:  1 }d       |
+      {2:  2 }e       |
+      {2:  3 }f       |
+                  |
+    ]])
+    feed('2<C-e>')
+    screen:expect([[
+      {2:    }V2      |
+      {2:    }V3      |
+      {2:  0 }^c       |
+      {2:  1 }d       |
+      {2:  2 }e       |
+      {2:  3 }f       |
+      {2:  4 }g       |
+      {2:  5 }h       |
+                  |
+    ]])
+  end)
+
   it('conceal_lines not checking on invalid row #36057', function()
     exec_lua(function()
       vim.fn.setline(1, { 'foo', 'bar', 'baz' })

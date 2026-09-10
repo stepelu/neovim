@@ -1658,22 +1658,23 @@ static void win_update(win_T *wp)
     }
   }
 
-  // Below logic compares wp->w_topline against wp->w_lines[0].wl_lnum,
-  // which may point to a line below wp->w_topline if it is concealed;
-  // incurring scrolling even though wp->w_topline is still the same.
-  // Compare against an adjusted topline instead:
+  // Concealed lines without filler have no cache entry. Compare the first
+  // displayed line and its visible filler against wp->w_lines[0].
   linenr_T topline_conceal = wp->w_topline;
+  int topfill_conceal = wp->w_topfill;
   while (topline_conceal < buf->b_ml.ml_line_count
-         && decor_conceal_line(wp, topline_conceal - 1, false)) {
+         && decor_conceal_line(wp, topline_conceal - 1, false)
+         && topfill_conceal == 0) {
     topline_conceal++;
     hasFolding(wp, topline_conceal, NULL, &topline_conceal);
+    topfill_conceal = win_get_fill(wp, topline_conceal);
   }
 
   // If there are no changes on the screen that require a complete redraw,
   // handle three cases:
   // 1: we are off the top of the screen by a few lines: scroll down
-  // 2: wp->w_topline is below wp->w_lines[0].wl_lnum: may scroll up
-  // 3: wp->w_topline is wp->w_lines[0].wl_lnum: find first entry in
+  // 2: topline_conceal is below wp->w_lines[0].wl_lnum: may scroll up
+  // 3: topline_conceal is wp->w_lines[0].wl_lnum: find first entry in
   //    w_lines[] that needs updating.
   if ((type == UPD_VALID || type == UPD_SOME_VALID
        || type == UPD_INVERTED || type == UPD_INVERTED_ALL)
@@ -1687,15 +1688,16 @@ static void win_update(win_T *wp)
     } else if (wp->w_lines[0].wl_valid
                && (topline_conceal < wp->w_lines[0].wl_lnum
                    || (topline_conceal == wp->w_lines[0].wl_lnum
-                       && wp->w_topfill > wp->w_old_topfill))) {
+                       && topfill_conceal > wp->w_old_topfill))) {
       // New topline is above old topline: May scroll down.
       int j;
       if (win_lines_concealed(wp)) {
         // Count the number of lines we are off, counting a sequence
-        // of folded lines as one, and skip concealed lines.
+        // of folded lines as one, and skip concealed lines without filler.
         j = 0;
         for (linenr_T ln = wp->w_topline; ln < wp->w_lines[0].wl_lnum; ln++) {
-          j += !decor_conceal_line(wp, ln - 1, false);
+          j += !decor_conceal_line(wp, ln - 1, false)
+               || (ln == wp->w_topline ? wp->w_topfill : win_get_fill(wp, ln)) > 0;
           if (j >= wp->w_view_height - 2) {
             break;
           }
@@ -1746,34 +1748,32 @@ static void win_update(win_T *wp)
       // When topline didn't change, find first entry in w_lines[] that
       // needs updating.
 
-      // try to find wp->w_topline in wp->w_lines[].wl_lnum
+      // Try to find the first displayed line in wp->w_lines[].wl_lnum.
       int j = -1;
       int row = 0;
       for (int i = 0; i < wp->w_lines_valid; i++) {
         if (wp->w_lines[i].wl_valid
-            && wp->w_lines[i].wl_lnum == wp->w_topline) {
+            && wp->w_lines[i].wl_lnum == topline_conceal) {
           j = i;
           break;
         }
         row += wp->w_lines[i].wl_size;
       }
       if (j == -1) {
-        // if wp->w_topline is not in wp->w_lines[].wl_lnum redraw all
-        // lines
+        // If the first displayed line is not cached, redraw all lines.
         mid_start = 0;
       } else {
         // Try to delete the correct number of lines.
-        // wp->w_topline is at wp->w_lines[i].wl_lnum.
 
         // If the topline didn't change, delete old filler lines,
         // otherwise delete filler lines of the new topline...
-        if (wp->w_lines[0].wl_lnum == wp->w_topline) {
+        if (wp->w_lines[0].wl_lnum == topline_conceal) {
           row += wp->w_old_topfill;
         } else {
-          row += win_get_fill(wp, wp->w_topline);
+          row += win_get_fill(wp, topline_conceal);
         }
         // ... but don't delete new filler lines.
-        row -= wp->w_topfill;
+        row -= topfill_conceal;
         if (row > 0) {
           win_scroll_lines(wp, 0, -row);
           bot_start = wp->w_view_height - row;
@@ -1808,7 +1808,7 @@ static void win_update(win_T *wp)
           // when it won't get updated below.
           if (win_may_fill(wp) && bot_start > 0) {
             wp->w_lines[0].wl_size
-              = (uint16_t)plines_correct_topline(wp, wp->w_topline, NULL, true, NULL);
+              = (uint16_t)plines_correct_topline(wp, topline_conceal, NULL, true, NULL);
           }
         }
       }
@@ -2042,7 +2042,9 @@ static void win_update(win_T *wp)
     // When syntax folding is being used, the saved syntax states will
     // already have been updated, we can't see where the syntax state is
     // the same again, just update until the end of the window.
-    if (row < top_end
+    // Skip leading concealed lines before reusing a cached entry.
+    if (lnum < topline_conceal
+        || row < top_end
         || (row >= mid_start && row < mid_end)
         || top_to_mod
         || idx >= wp->w_lines_valid
@@ -2075,7 +2077,7 @@ static void win_update(win_T *wp)
 
       // If the line is concealed and has no filler lines, go to the next line.
       bool concealed = decor_conceal_line(wp, lnum - 1, false);
-      if (concealed && win_get_fill(wp, lnum) == 0) {
+      if (concealed && (lnum == wp->w_topline ? wp->w_topfill : win_get_fill(wp, lnum)) == 0) {
         if (lnum == mod_top && lnum < mod_bot) {
           mod_top += foldinfo.fi_lines ? foldinfo.fi_lines : 1;
         }
@@ -2445,6 +2447,9 @@ redr_statuscol:
   // Reset the type of redrawing required, the window has been updated.
   wp->w_redr_type = 0;
   wp->w_old_topfill = wp->w_topfill;
+  if (wp->w_lines_valid > 0 && wp->w_lines[0].wl_lnum > wp->w_topline) {
+    wp->w_old_topfill = win_get_fill(wp, wp->w_lines[0].wl_lnum);
+  }
   wp->w_old_botfill = wp->w_botfill;
 
   // Send win_extmarks if needed

@@ -1173,7 +1173,7 @@ struct window_S {
   bool w_topline_was_set;           // flag set to true when topline is set,
                                     // e.g. by winrestview()
   int w_topfill;                    // number of filler lines above w_topline
-  int w_old_topfill;                // w_topfill at last redraw
+  int w_old_topfill;                // filler above first cached line at last redraw
   bool w_botfill;                   // true when filler lines are actually
                                     // below w_topline (at end of file)
   bool w_old_botfill;               // w_botfill at last redraw
