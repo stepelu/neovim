@@ -126,6 +126,7 @@ typedef struct {
   int c;
   int old_col;
   pos_T old_pos;
+  bool redraw_deferred;
   uint64_t last_redraw;
 } NormalState;
 
@@ -1409,6 +1410,19 @@ static void normal_redraw(NormalState *s)
   setcursor();
 }
 
+/// Single-key navigation that does not start an operator or change modes.
+static bool normal_is_navigation(int key)
+{
+  int idx = find_command(key);
+  if (idx < 0 || key == CAR || (nv_cmds[idx].cmd_flags & NV_SS)) {
+    return false;
+  }
+  nv_func_T fn = nv_cmds[idx].cmd_func;
+  return fn == nv_up || fn == nv_down || fn == nv_left || fn == nv_right
+         || fn == nv_page || fn == nv_halfpage || fn == nv_scroll_line
+         || fn == nv_mousescroll;
+}
+
 /// Function executed before each iteration of normal mode.
 ///
 /// @return:
@@ -1432,21 +1446,31 @@ static int normal_check(VimState *state)
 
   state_no_longer_safe(NULL);
 
-  // Give queued wheel input time to advance between redraws, including when
+  // Give queued navigation time to advance between redraws, including when
   // drawing itself takes longer than the interval.
-  const uint64_t kWheelRedrawIntervalNs = 8 * 1000000;
-  bool wheel = !Visual.active
-               && (s->ca.cmdchar == K_MOUSEUP || s->ca.cmdchar == K_MOUSEDOWN
-                   || s->ca.cmdchar == K_MOUSELEFT || s->ca.cmdchar == K_MOUSERIGHT);
-  bool defer_redraw = wheel && os_hrtime() - s->last_redraw < kWheelRedrawIntervalNs
-                      && input_pending_wheel();
+  const uint64_t kRedrawIntervalNs = 8 * 1000000;
+  bool redraw_due = os_hrtime() - s->last_redraw >= kRedrawIntervalNs;
+  bool navigation = !Visual.active && !op_pending() && restart_edit == 0
+                    && KeyTyped && !KeyStuffed && mod_mask == 0
+                    && normal_is_navigation(s->ca.cmdchar);
+  int next_key = NUL;
+  if (navigation && !redraw_due) {
+    next_key = input_peek_key();
+  }
+  bool defer_redraw = next_key != NUL && normal_is_navigation(next_key);
 
   // If skip redraw is set (for ":" in wait_return()), don't redraw now.
   if (skip_redraw) {
     skip_redraw = false;
     setcursor();
   } else if (defer_redraw && !do_redraw) {
-    // The next wheel event still needs valid cursor and viewport positions.
+    s->redraw_deferred = true;
+    // A skipped draw must still leave valid geometry for the next navigation command.
+    FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
+      if (wp == curwin || (curwin->w_p_crb && wp->w_p_crb)) {
+        validate_botline_win(wp);
+      }
+    }
     update_topline(curwin);
     validate_cursor(curwin);
   } else if (do_redraw || stuff_empty()) {
@@ -1480,8 +1504,9 @@ static int normal_check(VimState *state)
     normal_check_folds(s);
     normal_redraw(s);
     do_redraw = false;
-    if (wheel) {
+    if (s->redraw_deferred || (navigation && redraw_due)) {
       // Queued input can keep the main loop from reaching its usual UI flush.
+      s->redraw_deferred = false;
       ui_flush();
     }
     s->last_redraw = os_hrtime();
