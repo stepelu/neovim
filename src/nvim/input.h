@@ -7,6 +7,7 @@
 #include "nvim/eval/typval_defs.h"  // IWYU pragma: keep
 #include "nvim/event/defs.h"  // IWYU pragma: keep (MultiQueue)
 #include "nvim/input_defs.h"  // IWYU pragma: keep
+#include "nvim/state_defs.h"  // IWYU pragma: keep
 #include "nvim/types_defs.h"  // IWYU pragma: keep
 
 /// Argument for flush_buffers().

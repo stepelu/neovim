@@ -112,7 +112,7 @@
 #include "nvim/undo.h"
 #include "nvim/vim_defs.h"
 
-/// State for adding bytes to a recording or 'showcmd'.
+/// State for collecting the bytes of a complete input key.
 typedef struct {
   uint8_t buf[MB_MAXBYTES * 3 + 4];
   int prev_c;
@@ -120,6 +120,9 @@ typedef struct {
   unsigned pending_special;
   unsigned pending_mbyte;
 } gotchars_state_T;
+
+/// State requesting a refresh before input with side effects.
+static VimState *refresh_state = NULL;
 
 /// Index in scriptin
 static int curscript = -1;
@@ -187,6 +190,7 @@ static size_t last_recorded_len = 0;  ///< number of last recorded chars
 enum {
   KEYLEN_PART_KEY = -1,  ///< keylen value for incomplete key-code
   KEYLEN_PART_MAP = -2,  ///< keylen value for incomplete mapping
+  KEYLEN_REFRESH = -3,   ///< refresh before simplifying input
 };
 
 #include "input.c.generated.h"
@@ -1615,6 +1619,88 @@ static void add_byte_to_showcmd(uint8_t byte)
   }
 }
 
+/// Use an unmapped keypad or special key like its regular equivalent.
+static int normalize_input_key(int key, int *modifiers)
+{
+  switch (key) {
+  case K_KPLUS:
+    key = '+'; break;
+  case K_KMINUS:
+    key = '-'; break;
+  case K_KDIVIDE:
+    key = '/'; break;
+  case K_KMULTIPLY:
+    key = '*'; break;
+  case K_KENTER:
+    key = CAR; break;
+  case K_KPOINT:
+    key = '.'; break;
+  case K_KCOMMA:
+    key = ','; break;
+  case K_KEQUAL:
+    key = '='; break;
+  case K_K0:
+    key = '0'; break;
+  case K_K1:
+    key = '1'; break;
+  case K_K2:
+    key = '2'; break;
+  case K_K3:
+    key = '3'; break;
+  case K_K4:
+    key = '4'; break;
+  case K_K5:
+    key = '5'; break;
+  case K_K6:
+    key = '6'; break;
+  case K_K7:
+    key = '7'; break;
+  case K_K8:
+    key = '8'; break;
+  case K_K9:
+    key = '9'; break;
+
+  case K_XHOME:
+  case K_ZHOME:
+    if (*modifiers == MOD_MASK_SHIFT) {
+      key = K_S_HOME;
+      *modifiers = 0;
+    } else if (*modifiers == MOD_MASK_CTRL) {
+      key = K_C_HOME;
+      *modifiers = 0;
+    } else {
+      key = K_HOME;
+    }
+    break;
+  case K_XEND:
+  case K_ZEND:
+    if (*modifiers == MOD_MASK_SHIFT) {
+      key = K_S_END;
+      *modifiers = 0;
+    } else if (*modifiers == MOD_MASK_CTRL) {
+      key = K_C_END;
+      *modifiers = 0;
+    } else {
+      key = K_END;
+    }
+    break;
+
+  case K_KUP:
+  case K_XUP:
+    key = K_UP; break;
+  case K_KDOWN:
+  case K_XDOWN:
+    key = K_DOWN; break;
+  case K_KLEFT:
+  case K_XLEFT:
+    key = K_LEFT; break;
+  case K_KRIGHT:
+  case K_XRIGHT:
+    key = K_RIGHT; break;
+  }
+  return key;
+}
+
 /// Get the next input character.
 /// Can return a special key or a multi-byte character.
 /// Can return NUL when called recursively, use safe_vgetc() if that's not
@@ -1724,84 +1810,7 @@ int vgetc(void)
         vgetc_char = c;
       }
 
-      // A keypad or special function key was not mapped, use it like
-      // its ASCII equivalent.
-      switch (c) {
-      case K_KPLUS:
-        c = '+'; break;
-      case K_KMINUS:
-        c = '-'; break;
-      case K_KDIVIDE:
-        c = '/'; break;
-      case K_KMULTIPLY:
-        c = '*'; break;
-      case K_KENTER:
-        c = CAR; break;
-      case K_KPOINT:
-        c = '.'; break;
-      case K_KCOMMA:
-        c = ','; break;
-      case K_KEQUAL:
-        c = '='; break;
-      case K_K0:
-        c = '0'; break;
-      case K_K1:
-        c = '1'; break;
-      case K_K2:
-        c = '2'; break;
-      case K_K3:
-        c = '3'; break;
-      case K_K4:
-        c = '4'; break;
-      case K_K5:
-        c = '5'; break;
-      case K_K6:
-        c = '6'; break;
-      case K_K7:
-        c = '7'; break;
-      case K_K8:
-        c = '8'; break;
-      case K_K9:
-        c = '9'; break;
-
-      case K_XHOME:
-      case K_ZHOME:
-        if (mod_mask == MOD_MASK_SHIFT) {
-          c = K_S_HOME;
-          mod_mask = 0;
-        } else if (mod_mask == MOD_MASK_CTRL) {
-          c = K_C_HOME;
-          mod_mask = 0;
-        } else {
-          c = K_HOME;
-        }
-        break;
-      case K_XEND:
-      case K_ZEND:
-        if (mod_mask == MOD_MASK_SHIFT) {
-          c = K_S_END;
-          mod_mask = 0;
-        } else if (mod_mask == MOD_MASK_CTRL) {
-          c = K_C_END;
-          mod_mask = 0;
-        } else {
-          c = K_END;
-        }
-        break;
-
-      case K_KUP:
-      case K_XUP:
-        c = K_UP; break;
-      case K_KDOWN:
-      case K_XDOWN:
-        c = K_DOWN; break;
-      case K_KLEFT:
-      case K_XLEFT:
-        c = K_LEFT; break;
-      case K_KRIGHT:
-      case K_XRIGHT:
-        c = K_RIGHT; break;
-      }
+      c = normalize_input_key(c, &mod_mask);
 
       break;
     }
@@ -1876,6 +1885,20 @@ int vpeekc(void)
     return ungot.c;
   }
   return vgetorpeek(false);
+}
+
+/// Check for a complete key, yielding before mappings so the state can refresh.
+/// Returns NUL if a refresh is needed before retrying regular input lookup.
+int vpeekc_refresh(VimState *state)
+{
+  if (!stuff_empty() || can_get_ungot() || typeahead_char != 0 || typebuf.tb_maplen != 0) {
+    return NUL;
+  }
+  assert(refresh_state == NULL);
+  refresh_state = state;
+  int c = vpeekc();
+  refresh_state = NULL;
+  return c;
 }
 
 /// Check if any character is available, also half an escape sequence.
@@ -2087,6 +2110,7 @@ void f_getcharmod(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
 }
 
 typedef enum {
+  map_result_refresh,  // yield before applying a mapping
   map_result_fail,    // failed (recursion limit, OOM), break loop
   map_result_get,     // get a character from typeahead
   map_result_retry,   // try to map again
@@ -2135,7 +2159,8 @@ static bool at_ins_compl_key(void)
 /// Check if typebuf.tb_buf[] contains a modifier plus key that can be changed
 /// into just a key, apply that.
 /// Check from typebuf.tb_buf[typebuf.tb_off] to typebuf.tb_buf[typebuf.tb_off + "max_offset"].
-/// @return  the length of the replaced bytes, 0 if nothing changed, -1 for error.
+/// @return  the length of the replaced bytes, 0 if nothing changed, -1 for error,
+///          or KEYLEN_REFRESH to refresh before changing input.
 static int check_simplify_modifier(int max_offset)
 {
   // We want full modifiers in Terminal mode so that the key can be correctly
@@ -2157,6 +2182,19 @@ static int check_simplify_modifier(int max_offset)
       int new_c = merge_modifiers(c, &modifier);
 
       if (new_c != c) {
+        if (refresh_state != NULL) {
+          if (offset > 0 || *p_langmap != NUL) {
+            return KEYLEN_REFRESH;
+          }
+          char key[MAX_KEY_CODE_LEN + 1];
+          key[special_to_buf(new_c, modifier, true, key)] = NUL;
+          mapblock_T *mp = NULL;
+          int rhs_lua;
+          check_map(key, get_real_state(), false, false, false, &mp, NULL, &rhs_lua);
+          if (mp != NULL) {
+            return KEYLEN_REFRESH;
+          }
+        }
         if (offset == 0) {
           // At the start: remember the character and mod_mask before
           // merging, in some cases, e.g. at the hit-return prompt,
@@ -2246,6 +2284,45 @@ static int char_iter(const uint8_t **itp, int nomap)
 
   *itp = ++it;
   return c;
+}
+
+/// Check a complete original key before mapping or consuming any of its bytes.
+static int check_refresh_key(void)
+{
+  if (typebuf.tb_maplen != 0) {
+    return map_result_refresh;
+  }
+  gotchars_state_T frame = { 0 };
+  bool complete = false;
+  for (size_t i = 0; i < (size_t)typebuf.tb_len && i < sizeof(frame.buf); i++) {
+    if (gotchars_add_byte(&frame, typebuf.tb_buf[typebuf.tb_off + (int)i])) {
+      complete = true;
+      break;
+    }
+  }
+  if (!complete) {
+    return (size_t)typebuf.tb_len >= sizeof(frame.buf) ? map_result_refresh : map_result_nomatch;
+  }
+
+  const uint8_t *p = typebuf.tb_buf + typebuf.tb_off;
+  int key;
+  int modifiers = 0;
+  while (*p == K_SPECIAL && p[1] == KS_MODIFIER) {
+    modifiers = p[2];
+    p += 3;
+  }
+  if (*p == K_SPECIAL) {
+    key = TO_SPECIAL(p[1], p[2]);
+  } else {
+    key = char_iter(&p, 0);
+  }
+  if (!(State & MODE_TERMINAL) && no_reduce_keys == 0 && (no_mapping == 0 || allow_keys != 0)) {
+    key = merge_modifiers(key, &modifiers);
+  }
+  key = normalize_input_key(key, &modifiers);
+  return refresh_state->check_key != NULL
+         && refresh_state->check_key(refresh_state, key, modifiers)
+         ? map_result_get : map_result_refresh;
 }
 
 /// Handle mappings in the typeahead buffer.
@@ -2460,6 +2537,9 @@ static int handle_mapping(int *keylenp, const bool *timedout, int *mapdepth, boo
       } else {
         // Try to include the modifier into the key.
         keylen = check_simplify_modifier(max_mlen + 1);
+        if (keylen == KEYLEN_REFRESH) {
+          return map_result_refresh;
+        }
         if (keylen < 0) {
           // ins_typebuf() failed
           return map_result_fail;
@@ -2494,6 +2574,9 @@ static int handle_mapping(int *keylenp, const bool *timedout, int *mapdepth, boo
 
   // complete match
   if (keylen >= 0 && keylen <= typebuf.tb_len) {
+    if (refresh_state != NULL) {
+      return map_result_refresh;
+    }
     int i;
     char *map_str = NULL;
 
@@ -2788,8 +2871,11 @@ static int vgetorpeek(bool advance)
           break;
         } else if (typebuf.tb_len > 0) {
           // Check for a mapping in "typebuf".
-          map_result_T result = (map_result_T)handle_mapping(&keylen, &timedout, &mapdepth,
-                                                             advance);
+          map_result_T result = refresh_state !=
+                                NULL ? (map_result_T)check_refresh_key() : map_result_get;
+          if (result == map_result_get) {
+            result = (map_result_T)handle_mapping(&keylen, &timedout, &mapdepth, advance);
+          }
 
           if (result == map_result_retry) {
             // try mapping again
@@ -2800,6 +2886,11 @@ static int vgetorpeek(bool advance)
             atom_composite_abort();
             // failed, use the outer loop
             c = -1;
+            break;
+          }
+
+          if (result == map_result_refresh) {
+            c = NUL;
             break;
           }
 

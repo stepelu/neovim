@@ -24,12 +24,43 @@
 #include "nvim/option.h"
 #include "nvim/option_vars.h"
 #include "nvim/os/input.h"
+#include "nvim/os/time.h"
 #include "nvim/state.h"
 #include "nvim/strings.h"
 #include "nvim/types_defs.h"
 #include "nvim/ui.h"
 
 #include "state.c.generated.h"
+
+/// Complete a pending automatic refresh at an input-state boundary.
+static void state_refresh(VimState *s)
+{
+  state_refresh_callback refresh = s->refresh;
+  s->refresh = NULL;
+  s->refresh_started = 0;
+  if (refresh != NULL) {
+    refresh(s);
+  }
+}
+
+/// Coalesce automatic refreshes while input remains available.
+void state_request_refresh(VimState *s, state_refresh_callback refresh, bool defer)
+{
+  s->refresh = refresh;
+  if (!defer) {
+    state_refresh(s);
+    return;
+  }
+
+  const uint64_t kRefreshIntervalNs = 8 * 1000000;
+  if (s->refresh_started == 0) {
+    s->refresh_started = os_hrtime();
+  } else if (os_hrtime() - s->refresh_started >= kRefreshIntervalNs) {
+    state_refresh(s);
+    ui_flush();
+    s->refresh_started = os_hrtime();
+  }
+}
 
 void state_enter(VimState *s)
   FUNC_ATTR_NONNULL_ALL
@@ -45,6 +76,7 @@ void state_enter(VimState *s)
     // Execute this state.
 
     int key;
+    int peek;
 
 getkey:
     // Apply mappings first by calling vpeekc() directly.
@@ -56,7 +88,17 @@ getkey:
     //   - There is an incomplete mapping.
     //   A blocking wait for a character should only be done in the third case, which is the only
     //   case of the three where typebuf.tb_len > 0 after vpeekc() returns NUL.
-    if (vpeekc() != NUL || typebuf.tb_len > 0) {
+    peek = s->refresh != NULL ? vpeekc_refresh(s) : vpeekc();
+    if (peek == NUL) {
+      s->refresh_started = 0;
+      if (s->refresh != NULL) {
+        // Refresh before an incomplete mapping or an idle/event wait. The refresh
+        // may change mappings or insert input, so start input acquisition again.
+        state_refresh(s);
+        goto getkey;
+      }
+    }
+    if (peek != NUL || typebuf.tb_len > 0) {
       key = safe_vgetc();
     } else if (!multiqueue_empty(main_loop.events)) {
       // No input available and processing events may take time, flush now.

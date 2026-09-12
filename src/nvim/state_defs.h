@@ -1,13 +1,21 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
 typedef struct vim_state VimState;
 
 typedef int (*state_check_callback)(VimState *state);
 typedef int (*state_execute_callback)(VimState *state, int key);
+typedef void (*state_refresh_callback)(VimState *state);
+typedef bool (*state_check_key_callback)(VimState *state, int key, int modifiers);
 
 struct vim_state {
   state_check_callback check;
   state_execute_callback execute;
+  state_refresh_callback refresh;
+  state_check_key_callback check_key;  ///< Pure check: may this key precede a pending refresh?
+  uint64_t refresh_started;
 };
 
 /// Values for State

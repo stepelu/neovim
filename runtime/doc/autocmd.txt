@@ -1589,6 +1589,8 @@ WinScrolled			After any window in the current tabpage
 
 				|v:event| is set with information about size
 				and scroll changes. |WinScrolled-event|
+				Multiple scrolls may be reported together when
+				there is typeahead.
 
 				Only starts triggering after startup finished
 				and the first screen redraw was done.

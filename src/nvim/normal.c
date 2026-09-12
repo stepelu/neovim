@@ -118,6 +118,7 @@ typedef struct {
                           ///< - count prep, v:count publication.
                           ///< - scrollbind/cursorbind syncing after the command.
                           ///< - callers pair it with readbuf1_empty() to exclude stuffed keys.
+  bool can_defer_refresh;
   oparg_T oa;             ///< Operator arguments.
   cmdarg_T ca;            ///< Command arguments.
   int mapped_len;
@@ -141,6 +142,7 @@ static inline void normal_state_init(NormalState *s)
   memset(s, 0, sizeof(NormalState));
   s->state.check = normal_check;
   s->state.execute = normal_execute;
+  s->state.check_key = normal_check_key;
 }
 
 // nv_*(): functions called to handle Normal and Visual mode commands.
@@ -1099,6 +1101,7 @@ static int normal_execute(VimState *state, int key)
   atom_cmd_start(&frame);
 
   NormalState *s = (NormalState *)state;
+  s->can_defer_refresh = KeyTyped && !KeyStuffed && normal_check_key(state, key, mod_mask);
   s->command_finished = false;
   s->ctrl_w = false;                  // got CTRL-W command
   s->old_col = curwin->w_curswant;
@@ -1408,6 +1411,71 @@ static void normal_redraw(NormalState *s)
   setcursor();
 }
 
+/// Single-key navigation that does not start an operator or change modes.
+static bool normal_is_navigation(int key)
+{
+  int idx = find_command(key);
+  if (idx < 0 || key == CAR || (nv_cmds[idx].cmd_flags & NV_SS)) {
+    return false;
+  }
+  nv_func_T fn = nv_cmds[idx].cmd_func;
+  return fn == nv_up || fn == nv_down || fn == nv_left || fn == nv_right
+         || fn == nv_page || fn == nv_halfpage || fn == nv_scroll_line
+         || fn == nv_mousescroll;
+}
+
+static bool normal_check_key(VimState *state, int key, int modifiers)
+{
+  LANGMAP_ADJUST(key, true);
+  return !Visual.active && !op_pending() && restart_edit == 0
+         && modifiers == 0 && normal_is_navigation(key);
+}
+
+static void normal_refresh(VimState *state)
+{
+  NormalState *s = (NormalState *)state;
+  terminal_check_refresh();
+
+  // Ensure curwin->w_topline and curwin->w_leftcol are up to date
+  // before triggering a WinScrolled autocommand.
+  update_topline(curwin);
+  validate_cursor(curwin);
+
+  normal_check_cursor_moved(s);
+  normal_check_text_changed(s);
+  normal_check_window_scrolled(s);
+  normal_check_safe_state(s);
+
+  // Updating diffs from changed() does not always work properly,
+  // esp. updating folds.  Do an update just before redrawing if
+  // needed.
+  if (curtab->tp_diff_update || curtab->tp_diff_invalid) {
+    ex_diffupdate(NULL);
+    curtab->tp_diff_update = false;
+  }
+
+  // Scroll-binding for diff mode may have been postponed until
+  // here.  Avoids doing it for every change.
+  if (diff_need_scrollbind) {
+    check_scrollbind(0, 0);
+    diff_need_scrollbind = false;
+  }
+
+  normal_check_folds(s);
+  normal_redraw(s);
+  do_redraw = false;
+
+  // Now that we have drawn the first screen all the startup stuff
+  // has been done, close any file for startup messages.
+  if (time_fd != NULL) {
+    TIME_MSG("first screen update");
+    time_finish();
+  }
+  // After the first screen update may start triggering WinScrolled
+  // autocmd events.  Store all the scroll positions and sizes now.
+  may_make_initial_scroll_size_snapshot();
+}
+
 /// Function executed before each iteration of normal mode.
 ///
 /// @return:
@@ -1438,46 +1506,17 @@ static int normal_check(VimState *state)
     skip_redraw = false;
     setcursor();
   } else if (do_redraw || stuff_empty()) {
-    terminal_check_refresh();
-
-    // Ensure curwin->w_topline and curwin->w_leftcol are up to date
-    // before triggering a WinScrolled autocommand.
-    update_topline(curwin);
-    validate_cursor(curwin);
-
-    normal_check_cursor_moved(s);
-    normal_check_text_changed(s);
-    normal_check_window_scrolled(s);
-    normal_check_safe_state(s);
-
-    // Updating diffs from changed() does not always work properly,
-    // esp. updating folds.  Do an update just before redrawing if
-    // needed.
-    if (curtab->tp_diff_update || curtab->tp_diff_invalid) {
-      ex_diffupdate(NULL);
-      curtab->tp_diff_update = false;
+    state_request_refresh(state, normal_refresh, !do_redraw && s->can_defer_refresh);
+    if (state->refresh != NULL) {
+      // A deferred draw must leave valid geometry for the next command.
+      FOR_ALL_WINDOWS_IN_TAB(wp, curtab) {
+        if (wp == curwin || (curwin->w_p_crb && wp->w_p_crb)) {
+          validate_botline_win(wp);
+        }
+      }
+      update_topline(curwin);
+      validate_cursor(curwin);
     }
-
-    // Scroll-binding for diff mode may have been postponed until
-    // here.  Avoids doing it for every change.
-    if (diff_need_scrollbind) {
-      check_scrollbind(0, 0);
-      diff_need_scrollbind = false;
-    }
-
-    normal_check_folds(s);
-    normal_redraw(s);
-    do_redraw = false;
-
-    // Now that we have drawn the first screen all the startup stuff
-    // has been done, close any file for startup messages.
-    if (time_fd != NULL) {
-      TIME_MSG("first screen update");
-      time_finish();
-    }
-    // After the first screen update may start triggering WinScrolled
-    // autocmd events.  Store all the scroll positions and sizes now.
-    may_make_initial_scroll_size_snapshot();
   }
 
   // May perform garbage collection when waiting for a character, but
