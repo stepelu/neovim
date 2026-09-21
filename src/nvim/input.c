@@ -2686,12 +2686,20 @@ int input_peek_key(void)
   char lhs[5];
   memcpy(lhs, keys, (size_t)len);
   lhs[len] = NUL;
+  int mode = get_real_state();
   while (true) {
-    mapblock_T *mp = NULL;
-    int rhs_lua;
-    check_map(lhs, get_real_state(), false, false, false, &mp, NULL, &rhs_lua);
-    if (mp != NULL) {
-      return NUL;
+    // Checking both hash buckets first avoids a whole-table scan when neither holds a mapping
+    // for this first byte: check_map() walks every bucket, but only a mapping starting with
+    // this byte can match, and that is the one bucket it would be hashed into.  A key sharing
+    // its bucket, as every special key does, still pays for the scan.
+    int first = (uint8_t)lhs[0];
+    if (get_buf_maphash_list(mode, first) != NULL || get_maphash_list(mode, first) != NULL) {
+      mapblock_T *mp = NULL;
+      int rhs_lua;
+      check_map(lhs, mode, false, false, false, &mp, NULL, &rhs_lua);
+      if (mp != NULL) {
+        return NUL;
+      }
     }
     if (len != 4) {
       return key;

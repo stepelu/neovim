@@ -11,13 +11,17 @@ describe('navigation perf', function()
       { 'Insert', '<ScrollWheelDown><145,30>' },
       { 'Normal', '<C-E>' },
       { 'Normal', 'j' },
+      { 'Normal', 'j', 5000 },
     }) do
-      local mode, input = case[1], case[2]
+      local mode, input, mapping_count = case[1], case[2], case[3] or 0
       local label = ('%s %s, synthetic observer: %d us'):format(mode, input, cost_us)
+      if mapping_count > 0 then
+        label = label .. (', unrelated mappings: %d'):format(mapping_count)
+      end
       it(label, function()
         n.clear()
         Screen.new(210, 98)
-        n.exec_lua(function(cost, channel)
+        n.exec_lua(function(cost, mappings, channel)
           vim.cmd('set mouse=a mousescroll=ver:1,hor:1 nowrap scrolloff=0 cursorline splitright')
           local lines = {}
           for i = 1, 1600 do
@@ -25,6 +29,9 @@ describe('navigation perf', function()
           end
           vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
           vim.cmd('vsplit')
+          for i = 1, mappings do
+            vim.keymap.set('n', ('z%05d'):format(i), '<Nop>')
+          end
 
           local events = 0
           vim.api.nvim_create_autocmd({ 'CursorMoved', 'CursorMovedI', 'WinScrolled' }, {
@@ -44,7 +51,7 @@ describe('navigation perf', function()
           vim.keymap.set({ 'n', 'i' }, '<F4>', function()
             vim.rpcnotify(channel, 'navigation_done', vim.uv.hrtime() - started, events)
           end)
-        end, cost_us, n.api.nvim_get_api_info()[1])
+        end, cost_us, mapping_count, n.api.nvim_get_api_info()[1])
 
         local samples, event_counts = {}, {}
         for run = 0, 5 do
