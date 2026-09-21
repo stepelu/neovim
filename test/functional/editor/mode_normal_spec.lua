@@ -100,6 +100,20 @@ describe('Normal mode refresh batching', function()
   local lines = 'call setline(1, range(1, 400))'
   local wrapped = 'call setline(1, map(range(1, 400), {_, v -> repeat(v . " padding ", 9)}))'
 
+  local function map_j_after_cursor_moves()
+    n.exec_lua(function()
+      _G.mapping_ran = false
+      vim.api.nvim_create_autocmd('CursorMoved', {
+        once = true,
+        callback = function()
+          vim.keymap.set('n', 'j', function()
+            _G.mapping_ran = true
+          end)
+        end,
+      })
+    end)
+  end
+
   -- Postponing the refresh must not change where the cursor and the viewports end up.
   for _, case in ipairs({
     { 'j', 'set nowrap scrolloff=0 | ' .. lines, { 'j' }, 40 },
@@ -266,6 +280,42 @@ describe('Normal mode refresh batching', function()
     feed('jj')
     eq('cd', fn.getline(1))
     eq(2, n.exec_lua('return _G.changes'))
+  end)
+
+  it('does not batch a command that leaves Visual or Select mode', function()
+    Screen.new(45, 12)
+    command('set keymodel=stopsel')
+    fn.setline(1, fn.range(1, 20))
+
+    for _, start in ipairs({ 'v', 'gh' }) do
+      command('normal! gg')
+      map_j_after_cursor_moves()
+
+      -- <Down> stops Visual/Select mode before moving.  Its CursorMoved observer must run
+      -- before the following Normal-mode "j", so that a mapping installed by the observer
+      -- applies to it.
+      feed(start .. '<Down>j')
+      eq(true, n.exec_lua('return _G.mapping_ran'))
+      n.exec_lua("vim.keymap.del('n', 'j')")
+    end
+  end)
+
+  it('does not batch a motion that finishes an operator', function()
+    Screen.new(45, 12)
+    fn.setline(1, fn.range(1, 20))
+    command('normal! gg')
+    n.exec_lua(function()
+      _G.move_operator = function()
+        vim.api.nvim_win_set_cursor(0, { 5, 0 })
+      end
+      vim.go.operatorfunc = 'v:lua._G.move_operator'
+    end)
+    map_j_after_cursor_moves()
+
+    -- The first "j" is the motion for g@, not standalone navigation.  The custom operator
+    -- moves the cursor, whose observer must install the mapping before the following "j".
+    feed('g@jj')
+    eq(true, n.exec_lua('return _G.mapping_ran'))
   end)
 
   it('publishes observers before evaluating a mapping', function()

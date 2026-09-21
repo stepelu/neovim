@@ -109,6 +109,7 @@
 typedef struct {
   VimState state;
   bool command_finished;
+  bool command_is_navigation;  ///< Began as standalone Normal-mode navigation.
   bool ctrl_w;
   bool need_flushbuf;
   bool set_prevcount;
@@ -1101,6 +1102,7 @@ static int normal_execute(VimState *state, int key)
 
   NormalState *s = (NormalState *)state;
   s->command_finished = false;
+  s->command_is_navigation = false;
   s->ctrl_w = false;                  // got CTRL-W command
   s->old_col = curwin->w_curswant;
   s->c = key;
@@ -1202,6 +1204,10 @@ static int normal_execute(VimState *state, int key)
     s->command_finished = true;
     goto finish;
   }
+
+  s->command_is_navigation = !Visual.active && !op_pending() && restart_edit == 0
+                             && KeyTyped && !KeyStuffed && mod_mask == 0
+                             && normal_is_navigation(s->ca.cmdchar);
 
   // In Visual/Select mode, a few keys are handled in a special way.
   if (Visual.active && normal_handle_special_visual_command(s)) {
@@ -1445,13 +1451,11 @@ static int normal_check(VimState *state)
 
   state_no_longer_safe(NULL);
 
-  bool navigation = !Visual.active && !op_pending() && restart_edit == 0
-                    && KeyTyped && !KeyStuffed && mod_mask == 0
-                    && normal_is_navigation(s->ca.cmdchar);
-  int next_key = navigation ? input_peek_key() : NUL;
+  int next_key = s->command_is_navigation ? input_peek_key() : NUL;
   bool queued_navigation = next_key != NUL && normal_is_navigation(next_key);
 
-  // Measure the interval within queued navigation, excluding preceding idle time.
+  // Use a cooperative ~120 Hz budget within queued navigation, excluding preceding idle time.
+  // A slow command may overrun it: this is a refresh cadence, not a latency guarantee.
   const uint64_t kRedrawIntervalNs = 8 * 1000000;
   if (!queued_navigation) {
     s->last_redraw = 0;
