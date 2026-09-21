@@ -452,9 +452,14 @@ OPTIONS
 
 PERFORMANCE
 
-• Mouse scrolling and basic keyboard navigation in Normal mode batch redraws
-  while input is queued, improving responsiveness with expensive cursor/scroll
-  callbacks.
+• Normal mode coalesces cursor/scroll callbacks and redraws across a run of
+  queued navigation commands, as Insert mode has always done, aiming to draw an
+  intermediate frame about every 8 ms.  Fast scrolling with expensive
+  |CursorMoved| or |WinScrolled| handlers is much cheaper as a result.  As with
+  typeahead in Insert mode, handlers and |nvim_set_decoration_provider()|
+  callbacks then observe the accumulated result rather than every step; with
+  `conceal_lines` decorations applied during redraw this can change how far a
+  queued scroll travels.
 • |treesitter-highlight| performance on large injection-heavy files improves
   by 50% to 100% by reusing edited child-tree ranges.
 • Nvim architecture allows pure-Lua implementations of some `vim.fn`
